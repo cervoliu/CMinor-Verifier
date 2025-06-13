@@ -375,3 +375,6 @@ Properties/
 
 # The score of CMinor verifier
 .score
+
+# The API doc of CMinor verifier
+api-doc/

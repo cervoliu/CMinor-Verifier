@@ -50,7 +50,7 @@ dotnet run -- --source <path>
 我们不再使用传统的 OJ 来提交代码，而是用 [GitHub Actions](https://github.com/features/actions) 将自动化测试直接集成进项目中。
 简而言之，你的每一次 push 都相当于自动提交了代码，会触发一个名为 `Build and Test` 的 job，其会构建项目并评测所有测例，其得分（百分制）为：
 
-![Error when building and testing](https://byob.yarr.is/thufv/CMinor/score)
+![Error when building and testing](https://byob.yarr.is/cervoliu/CMinor/score)
 
 > 注1：请在 fork 后将上面的 URL 中的 `thufv` 替换为你的用户名。
 
