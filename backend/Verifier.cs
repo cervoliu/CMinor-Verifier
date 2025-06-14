@@ -18,6 +18,7 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
+using CommandLine;
 
 namespace cminor
 {
@@ -33,19 +34,15 @@ namespace cminor
             this.writer = writer;
         }
 
-        private Expression ConditionToExpression(List<Expression> conditions)
+        static private Expression ConditionToExpression(List<Expression> conditions)
         {
-            if(conditions.Count == 0) return new BoolConstantExpression(true);
-            Expression exp = conditions[0];
-            for (int i = 1; i < conditions.Count; i++)
-            {
-                Expression expr = conditions[i];
-                exp = new AndExpression(exp, expr);
-            }
+            Expression exp = new BoolConstantExpression(true);
+            for (int i = 0; i < conditions.Count; i++)
+                exp = new AndExpression(exp, conditions[i]);
             return exp;
         }
 
-        private Expression FunEntryRequire(FunctionCallStatement fcs)
+        static private Expression FunEntryRequire(FunctionCallStatement fcs)
         {
             Function fun = fcs.rhs.function;
             Expression assertExpr = ConditionToExpression(fun.preconditionBlock.conditions);
@@ -61,7 +58,7 @@ namespace cminor
             return assertExpr;
         }
 
-        private AssumeStatement FunReturnEnsure(FunctionCallStatement fcs)
+        static private AssumeStatement FunReturnEnsure(FunctionCallStatement fcs)
         {
             Function fun = fcs.rhs.function;
             Expression assumeExpr = ConditionToExpression(fun.postconditionBlock.conditions);
@@ -84,21 +81,28 @@ namespace cminor
             return assumeStmt;
         }
 
-        private int CheckBasicPath(BasicPath bp)
+        static private Expression LexLess(List<Expression> a, List<Expression> b)
         {
-            // writer.WriteLine("Checking basic path: ");
-            // writer.WriteLine("Head conditions:");
-            // bp.headConditions.ForEach(c => c.Print(writer));
-            // writer.WriteLine("\nstatements:");
-            // foreach (var stmt in bp.statements)
-            // {
-            //     stmt.Print(writer);
-            // }
-            // writer.WriteLine("Tail conditions:");
-            // bp.tailConditions.ForEach(c => c.Print(writer));
-            // writer.WriteLine("\n");
-            Expression wlp = ConditionToExpression(bp.tailConditions);
-            foreach (var stmt in bp.statements.AsEnumerable().Reverse())
+            // lexicographic less than based on well-founded relation
+            Debug.Assert(a.Count == b.Count, "LexLess: a and b must have the same length.");
+            var zero = new IntConstantExpression(0);
+            Expression res = new AndExpression(new LTExpression(a[0], b[0]), new GEExpression(b[0], zero));
+            for (int i = 1; i < a.Count; i++)
+            {
+                Expression expr = new AndExpression(new LTExpression(a[i], b[i]), new GEExpression(b[i], zero));
+                for (int j = 0; j < i; j++)
+                {
+                    expr = new AndExpression(expr, new EQExpression(a[j], b[j]));
+                }
+                res = new OrExpression(res, expr);
+            }
+            return res;
+        }
+
+        static private Expression PredicateTransform(Expression p, List<Statement> statements)
+        {
+            Expression wlp = p;
+            foreach (var stmt in statements.AsEnumerable().Reverse())
             {
                 if (stmt is AssumeStatement assumeStmt)
                 {
@@ -119,10 +123,73 @@ namespace cminor
                 // wlp.Print(writer);
                 // writer.WriteLine();
             }
+            return wlp;
+        }
+
+        private int CheckBasicPath(BasicPath bp)
+        {
+            writer.WriteLine("============================");
+            writer.WriteLine("Checking basic path: ");
+            writer.WriteLine("Head conditions:");
+            bp.headConditions.ForEach(c => c.Print(writer));
+            writer.WriteLine("\nstatements:");
+            foreach (var stmt in bp.statements)
+            {
+                stmt.Print(writer);
+            }
+            writer.WriteLine("Tail conditions:");
+            bp.tailConditions.ForEach(c => c.Print(writer));
+            writer.WriteLine("\n");
+
+            // Partial Correctness
+            Expression wlp = ConditionToExpression(bp.tailConditions);
+            wlp = PredicateTransform(wlp, bp.statements);
             Expression precond = ConditionToExpression(bp.headConditions);
             var res = solver.CheckValid(new ImplicationExpression(precond, wlp));
-            if (res is null) return 1;
-            return -1;
+            if (res is not null) return -1;
+
+            // Total Correctness (termination)
+            List<Expression> headRank = bp.headRankingFunctions;
+            List<Expression> tailRank = bp.tailRankingFunctions;
+            if (headRank.Count == 0) return 1;
+            if (tailRank.Count == 0)
+            {
+                Expression nonNeg = new BoolConstantExpression(true);
+                foreach (var hr in headRank)
+                {
+                    nonNeg = new AndExpression(nonNeg, new GEExpression(hr, new IntConstantExpression(0)));
+                }
+                res = solver.CheckValid(new ImplicationExpression(precond, nonNeg));
+                if (res is not null) return -1;
+                return 1;
+            }
+
+            Dictionary<LocalVariable, Expression> varSubstitutions = new();
+            for (int i = 0; i < headRank.Count; i++)
+            {
+                Expression currentHr = headRank[i];
+                foreach (var v in currentHr.GetFreeVariables())
+                {
+                    var newVar = new LocalVariable { type = v.type, name = v.name + "_head" };
+                    varSubstitutions[newVar] = new VariableExpression(v);
+                    currentHr = currentHr.Substitute(v, new VariableExpression(newVar));
+                }
+                headRank[i] = currentHr;
+            }
+
+            Expression dec = LexLess(tailRank, headRank);
+            dec = PredicateTransform(dec, bp.statements);
+
+            foreach (var v in varSubstitutions.Keys)
+                dec = dec.Substitute(v, varSubstitutions[v]);
+            precond.Print(writer);
+            writer.WriteLine();
+            dec.Print(writer);
+            writer.WriteLine();
+            ImplicationExpression impl = new(precond, dec);
+            res = solver.CheckValid(impl);
+            if (res is not null) return -1;
+            return 1;
         }
 
         static private BasicPath Deepcopy(BasicPath bp)
@@ -137,8 +204,18 @@ namespace cminor
             };
         }
 
+        static private Expression Deepcopy(Expression exp)
+        {
+            // Cervol: There's no clone method for the Expression abstract class, so 
+            // I have to use the Substitute method to make a deep copy indirectly.
+            // This is a hack, not a good approach.
+            var dummyVar = new LocalVariable { type = exp.type, name = "dummy" };
+            return exp.Substitute(dummyVar, new VariableExpression(dummyVar));
+        }
+
         private int DfsCFG(Block u, BasicPath bp)
         {
+            u.Print(writer); writer.WriteLine();
             switch (u)
             {
                 case PreconditionBlock:
@@ -168,9 +245,9 @@ namespace cminor
                         foreach (Statement stmt in loopHead.statements)
                             bp_.statements.Add(stmt);
                         foreach (Block v in loopHead.successors)
-                                if (DfsCFG(v, Deepcopy(bp_)) < 0) return -1;
+                            if (DfsCFG(v, Deepcopy(bp_)) < 0) return -1;
                     }
-                    
+
                     bp.tailConditions = loopHead.invariants;
                     bp.tailRankingFunctions = loopHead.rankingFunctions;
                     return CheckBasicPath(bp);
@@ -183,7 +260,6 @@ namespace cminor
                         {
                             BasicPath bp_ = Deepcopy(bp);
                             bp_.tailConditions = new List<Expression> { assertStmt.pred };
-                            // TODO: bp_.tailRankingFunctions = new List<Expression>();
                             if (CheckBasicPath(bp_) < 0) return -1;
 
                             AssumeStatement assumeStmt = new() { condition = assertStmt.pred };
@@ -195,9 +271,23 @@ namespace cminor
                         }
                         else if (s is FunctionCallStatement fcs)
                         {
+                            var fun = fcs.rhs.function;
+                            Debug.Assert(fun.parameters.Count == fcs.rhs.argumentVariables.Count,
+                                "FunctionCallStatement's argumentVariables count must match the function's parameters count.");
+                            var rankFuns = fun.preconditionBlock.rankingFunctions;
                             BasicPath bp_ = Deepcopy(bp);
                             bp_.tailConditions = new List<Expression> { FunEntryRequire(fcs) };
-                            // TODO: bp_.tailRankingFunctions = new List<Expression>();
+                            bp_.tailRankingFunctions = new List<Expression> { };
+                            for (int i = 0; i < rankFuns.Count; i++)
+                            {
+                                var rf = Deepcopy(rankFuns[i]);
+                                for (int j = 0; j < fun.parameters.Count; j++)
+                                {
+                                    VariableExpression argVar = new(fcs.rhs.argumentVariables[j]);
+                                    rf = rf.Substitute(fun.parameters[j], argVar);
+                                }
+                                bp_.tailRankingFunctions.Add(rf);
+                            }
                             if (CheckBasicPath(bp_) < 0) return -1;
 
                             bp.statements.Add(FunReturnEnsure(fcs));
