@@ -34,51 +34,38 @@ namespace cminor
             this.writer = writer;
         }
 
-        static private Expression ConditionToExpression(List<Expression> conditions)
+        static private BasicPath DeepCopy(BasicPath bp)
+        {
+            return new()
+            {
+                headConditions = new List<Expression>(bp.headConditions),
+                headRankingFunctions = new List<Expression>(bp.headRankingFunctions),
+                tailConditions = new List<Expression>(bp.tailConditions),
+                tailRankingFunctions = new List<Expression>(bp.tailRankingFunctions),
+                statements = new List<Statement>(bp.statements)
+            };
+        }
+
+        static private Expression DeepCopy(Expression exp)
+        {
+            // Cervol: There's no clone method for the Expression abstract class, so 
+            // I have to use the Substitute method to make a deep copy indirectly.
+            // This is a hack, not a good approach.
+            var dummyVar = new LocalVariable { type = exp.type, name = "dummy" };
+            return exp.Substitute(dummyVar, new VariableExpression(dummyVar));
+        }
+
+        static private List<Expression> DeepCopy(List<Expression> exps)
+        {
+            return new List<Expression>(exps.Select(DeepCopy));
+        }
+
+        static private Expression Conjunct(List<Expression> conditions)
         {
             Expression exp = new BoolConstantExpression(true);
             for (int i = 0; i < conditions.Count; i++)
                 exp = new AndExpression(exp, conditions[i]);
             return exp;
-        }
-
-        static private Expression FunEntryRequire(FunctionCallStatement fcs)
-        {
-            Function fun = fcs.rhs.function;
-            Expression assertExpr = ConditionToExpression(fun.preconditionBlock.conditions);
-
-            Debug.Assert(fcs.rhs.argumentVariables.Count == fun.parameters.Count, "FunctionCallStatement's argumentVariables count must match the function's parameters count.");
-
-            for (int i = 0; i < fun.parameters.Count; i++)
-            {
-                VariableExpression varExpr = new(fcs.rhs.argumentVariables[i]);
-                assertExpr = assertExpr.Substitute(fun.parameters[i], varExpr);
-            }
-
-            return assertExpr;
-        }
-
-        static private AssumeStatement FunReturnEnsure(FunctionCallStatement fcs)
-        {
-            Function fun = fcs.rhs.function;
-            Expression assumeExpr = ConditionToExpression(fun.postconditionBlock.conditions);
-
-            Debug.Assert(fcs.rhs.argumentVariables.Count == fun.parameters.Count, "FunctionCallStatement's argumentVariables count must match the function's parameters count.");
-
-            for (int i = 0; i < fun.parameters.Count; i++)
-            {
-                VariableExpression varExpr = new(fcs.rhs.argumentVariables[i]);
-                assumeExpr = assumeExpr.Substitute(fun.parameters[i], varExpr);
-            }
-
-            for (int i = 0; i < fun.rvs.Count; i++)
-            {
-                VariableExpression varExpr = new(fcs.lhs[i]);
-                assumeExpr = assumeExpr.Substitute(fun.rvs[i], varExpr);
-            }
-
-            AssumeStatement assumeStmt = new() { condition = assumeExpr };
-            return assumeStmt;
         }
 
         static private Expression LexLess(List<Expression> a, List<Expression> b)
@@ -99,9 +86,8 @@ namespace cminor
             return res;
         }
 
-        static private Expression PredicateTransform(Expression p, List<Statement> statements)
+        static private Expression PredicateTransform(Expression wlp, List<Statement> statements)
         {
-            Expression wlp = p;
             foreach (var stmt in statements.AsEnumerable().Reverse())
             {
                 if (stmt is AssumeStatement assumeStmt)
@@ -128,23 +114,24 @@ namespace cminor
 
         private int CheckBasicPath(BasicPath bp)
         {
-            writer.WriteLine("============================");
-            writer.WriteLine("Checking basic path: ");
-            writer.WriteLine("Head conditions:");
-            bp.headConditions.ForEach(c => c.Print(writer));
-            writer.WriteLine("\nstatements:");
-            foreach (var stmt in bp.statements)
-            {
-                stmt.Print(writer);
-            }
-            writer.WriteLine("Tail conditions:");
-            bp.tailConditions.ForEach(c => c.Print(writer));
-            writer.WriteLine("\n");
+            // writer.WriteLine("============================");
+            // writer.WriteLine("Checking basic path: ");
+            // writer.WriteLine("Head conditions:");
+            // bp.headConditions.ForEach(c => c.Print(writer));
+            // writer.WriteLine("\nstatements:");
+            // foreach (var stmt in bp.statements)
+            // {
+            //     stmt.Print(writer);
+            // }
+            // writer.WriteLine("Tail conditions:");
+            // bp.tailConditions.ForEach(c => c.Print(writer));
+            // writer.WriteLine("\n");
 
             // Partial Correctness
-            Expression wlp = ConditionToExpression(bp.tailConditions);
+            Expression wlp = Conjunct(bp.tailConditions);
             wlp = PredicateTransform(wlp, bp.statements);
-            Expression precond = ConditionToExpression(bp.headConditions);
+            // wlp.Print(writer); writer.WriteLine();
+            Expression precond = Conjunct(bp.headConditions);
             var res = solver.CheckValid(new ImplicationExpression(precond, wlp));
             if (res is not null) return -1;
 
@@ -182,88 +169,58 @@ namespace cminor
 
             foreach (var v in varSubstitutions.Keys)
                 dec = dec.Substitute(v, varSubstitutions[v]);
-            precond.Print(writer);
-            writer.WriteLine();
-            dec.Print(writer);
-            writer.WriteLine();
+            // precond.Print(writer); writer.WriteLine();
+            // dec.Print(writer); writer.WriteLine();
             ImplicationExpression impl = new(precond, dec);
             res = solver.CheckValid(impl);
             if (res is not null) return -1;
             return 1;
         }
 
-        static private BasicPath Deepcopy(BasicPath bp)
-        {
-            return new()
-            {
-                headConditions = new List<Expression>(bp.headConditions),
-                headRankingFunctions = new List<Expression>(bp.headRankingFunctions),
-                tailConditions = new List<Expression>(bp.tailConditions),
-                tailRankingFunctions = new List<Expression>(bp.tailRankingFunctions),
-                statements = new List<Statement>(bp.statements)
-            };
-        }
-
-        static private Expression Deepcopy(Expression exp)
-        {
-            // Cervol: There's no clone method for the Expression abstract class, so 
-            // I have to use the Substitute method to make a deep copy indirectly.
-            // This is a hack, not a good approach.
-            var dummyVar = new LocalVariable { type = exp.type, name = "dummy" };
-            return exp.Substitute(dummyVar, new VariableExpression(dummyVar));
-        }
-
         private int DfsCFG(Block u, BasicPath bp)
         {
-            u.Print(writer); writer.WriteLine();
             switch (u)
             {
-                case PreconditionBlock:
-                    PreconditionBlock pre = (PreconditionBlock)u;
-                    bp.headConditions = pre.conditions;
-                    bp.headRankingFunctions = pre.rankingFunctions;
+                case PreconditionBlock pre:
+                    bp.headConditions = DeepCopy(pre.conditions);
+                    bp.headRankingFunctions = DeepCopy(pre.rankingFunctions);
                     foreach (Block v in pre.successors)
-                        if (DfsCFG(v, Deepcopy(bp)) < 0) return -1;
+                        if (DfsCFG(v, DeepCopy(bp)) < 0) return -1;
                     break;
 
-                case PostconditionBlock:
-                    PostconditionBlock post = (PostconditionBlock)u;
-                    bp.tailConditions = post.conditions;
+                case PostconditionBlock post:
+                    bp.tailConditions = DeepCopy(post.conditions);
                     return CheckBasicPath(bp);
 
-                case LoopHeadBlock:
-                    LoopHeadBlock loopHead = (LoopHeadBlock)u;
-
+                case LoopHeadBlock loopHead:
                     if (!visitedLoopHeads.Contains(loopHead.number))
                     {
                         visitedLoopHeads.Add(loopHead.number);
                         BasicPath bp_ = new()
                         {
-                            headConditions = loopHead.invariants,
-                            headRankingFunctions = loopHead.rankingFunctions
+                            headConditions = DeepCopy(loopHead.invariants),
+                            headRankingFunctions = DeepCopy(loopHead.rankingFunctions)
                         };
                         foreach (Statement stmt in loopHead.statements)
                             bp_.statements.Add(stmt);
                         foreach (Block v in loopHead.successors)
-                            if (DfsCFG(v, Deepcopy(bp_)) < 0) return -1;
+                            if (DfsCFG(v, DeepCopy(bp_)) < 0) return -1;
                     }
 
-                    bp.tailConditions = loopHead.invariants;
-                    bp.tailRankingFunctions = loopHead.rankingFunctions;
+                    bp.tailConditions = DeepCopy(loopHead.invariants);
+                    bp.tailRankingFunctions = DeepCopy(loopHead.rankingFunctions);
                     return CheckBasicPath(bp);
 
-                case BasicBlock:
-                    BasicBlock basic = (BasicBlock)u;
+                case BasicBlock basic:
                     foreach (Statement s in basic.statements)
                     {
                         if (s is AssertStatement assertStmt)
                         {
-                            BasicPath bp_ = Deepcopy(bp);
-                            bp_.tailConditions = new List<Expression> { assertStmt.pred };
+                            BasicPath bp_ = DeepCopy(bp);
+                            bp_.tailConditions = new List<Expression> { DeepCopy(assertStmt.pred) };
                             if (CheckBasicPath(bp_) < 0) return -1;
 
-                            AssumeStatement assumeStmt = new() { condition = assertStmt.pred };
-                            bp.statements.Add(assumeStmt);
+                            bp.statements.Add(new AssumeStatement { condition = assertStmt.pred });
                         }
                         else if (s is AssumeStatement or AssignStatement)
                         {
@@ -274,27 +231,36 @@ namespace cminor
                             var fun = fcs.rhs.function;
                             Debug.Assert(fun.parameters.Count == fcs.rhs.argumentVariables.Count,
                                 "FunctionCallStatement's argumentVariables count must match the function's parameters count.");
-                            var rankFuns = fun.preconditionBlock.rankingFunctions;
-                            BasicPath bp_ = Deepcopy(bp);
-                            bp_.tailConditions = new List<Expression> { FunEntryRequire(fcs) };
-                            bp_.tailRankingFunctions = new List<Expression> { };
-                            for (int i = 0; i < rankFuns.Count; i++)
+
+                            BasicPath bp_ = DeepCopy(bp);
+                            bp_.tailConditions = DeepCopy(fun.preconditionBlock.conditions);
+                            bp_.tailRankingFunctions = DeepCopy(fun.preconditionBlock.rankingFunctions);
+                            for (int j = 0; j < fun.parameters.Count; j++)
                             {
-                                var rf = Deepcopy(rankFuns[i]);
-                                for (int j = 0; j < fun.parameters.Count; j++)
-                                {
-                                    VariableExpression argVar = new(fcs.rhs.argumentVariables[j]);
-                                    rf = rf.Substitute(fun.parameters[j], argVar);
-                                }
-                                bp_.tailRankingFunctions.Add(rf);
+                                VariableExpression argExpr = new(fcs.rhs.argumentVariables[j]);
+                                for (int i = 0; i < bp_.tailConditions.Count; i++)
+                                    bp_.tailConditions[i] = bp_.tailConditions[i].Substitute(fun.parameters[j], argExpr);
+                                for (int i = 0; i < bp_.tailRankingFunctions.Count; i++)
+                                    bp_.tailRankingFunctions[i] = bp_.tailRankingFunctions[i].Substitute(fun.parameters[j], argExpr);
                             }
                             if (CheckBasicPath(bp_) < 0) return -1;
 
-                            bp.statements.Add(FunReturnEnsure(fcs));
+                            Expression assumeExpr = Conjunct(fun.postconditionBlock.conditions);
+                            for (int j = 0; j < fun.parameters.Count; j++)
+                            {
+                                VariableExpression argExpr = new(fcs.rhs.argumentVariables[j]);
+                                assumeExpr = assumeExpr.Substitute(fun.parameters[j], argExpr);
+                            }
+                            for (int j = 0; j < fun.rvs.Count; j++)
+                            {
+                                VariableExpression varExpr = new(fcs.lhs[j]);
+                                assumeExpr = assumeExpr.Substitute(fun.rvs[j], varExpr);
+                            }
+                            bp.statements.Add(new AssumeStatement { condition = assumeExpr });
                         }
                     }
                     foreach (Block v in basic.successors)
-                        if (DfsCFG(v, Deepcopy(bp)) < 0) return -1;
+                        if (DfsCFG(v, DeepCopy(bp)) < 0) return -1;
                     break;
 
                 default:
